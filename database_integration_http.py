@@ -70,6 +70,25 @@ class DatabaseManagerHTTP:
         else:
             self.logger.warning("未找到数据库配置，将使用离线模式")
     
+    def _parse_barcode_status(self, barcode_data: str) -> tuple:
+        """
+        解析条码数据中的状态信息
+        
+        Args:
+            barcode_data: 原始条码数据
+            
+        Returns:
+            (clean_barcode_data, status): 清理后的条码数据和状态
+        """
+        if barcode_data.startswith('1@'):
+            return barcode_data[2:], '已切割'
+        elif barcode_data.startswith('2@'):
+            return barcode_data[2:], '已清角'
+        elif barcode_data.startswith('3@'):
+            return barcode_data[2:], '已入库'
+        else:
+            return barcode_data, None
+    
     def test_connection(self) -> bool:
         """测试数据库连接"""
         if not self.api_url or not self.headers:
@@ -106,10 +125,14 @@ class DatabaseManagerHTTP:
                 return False
         
         try:
+            # 解析条码数据中的状态信息
+            clean_barcode_data, status = self._parse_barcode_status(barcode_data)
+            
             scan_data = {
-                'barcode_data': barcode_data,
+                'barcode_data': clean_barcode_data,
                 'device_port': device_port,
-                'scan_time': datetime.now().isoformat()
+                'scan_time': datetime.now().isoformat(),
+                'status': status
             }
             
             self.logger.debug(f"尝试上传扫描数据: {scan_data}")
@@ -122,7 +145,7 @@ class DatabaseManagerHTTP:
             )
             
             if response.status_code in [200, 201]:
-                self.logger.info(f"扫描数据上传成功: {barcode_data}")
+                self.logger.info(f"扫描数据上传成功: {clean_barcode_data} (状态: {status or '无'})")
                 # 同时保存到本地备份（如果启用）
                 if self.config['local_backup_enabled']:
                     self._save_to_local(barcode_data, device_port)
@@ -147,10 +170,14 @@ class DatabaseManagerHTTP:
             return False
         
         try:
+            # 解析条码数据中的状态信息
+            clean_barcode_data, status = self._parse_barcode_status(barcode_data)
+            
             local_data = {
-                'barcode_data': barcode_data,
+                'barcode_data': clean_barcode_data,
                 'scan_time': datetime.now().isoformat(),
                 'device_port': device_port,
+                'status': status,
                 'synced': False
             }
             
@@ -166,7 +193,7 @@ class DatabaseManagerHTTP:
             with open(filepath, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(local_data, ensure_ascii=False) + '\n')
             
-            self.logger.info(f"扫描数据保存到本地: {barcode_data}")
+            self.logger.info(f"扫描数据保存到本地: {clean_barcode_data} (状态: {status or '无'})")
             return True
             
         except Exception as e:
@@ -219,7 +246,8 @@ class DatabaseManagerHTTP:
                         scan_data = {
                             'barcode_data': record['barcode_data'],
                             'device_port': record['device_port'],
-                            'scan_time': record.get('scan_time', datetime.now().isoformat())
+                            'scan_time': record.get('scan_time', datetime.now().isoformat()),
+                            'status': record.get('status')
                         }
                         
                         response = requests.post(
@@ -232,7 +260,7 @@ class DatabaseManagerHTTP:
                         if response.status_code in [200, 201]:
                             record['synced'] = True
                             uploaded_count += 1
-                            self.logger.debug(f"同步成功: {record['barcode_data']}")
+                            self.logger.debug(f"同步成功: {record['barcode_data']} (状态: {record.get('status', '无')})")
                     
                     unsynced_lines.append(json.dumps(record, ensure_ascii=False) + '\n')
                     
