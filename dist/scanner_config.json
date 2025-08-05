@@ -1,0 +1,7 @@
+{
+    "ports": [
+        "COM5",
+        "COM6"
+    ],
+    "sound_enabled": true
+}
