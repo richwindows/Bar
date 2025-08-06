@@ -80,34 +80,24 @@ class DatabaseManagerHTTP:
         Returns:
             (clean_barcode_data, status): 清理后的条码数据和状态
         """
-        if barcode_data.startswith('1@'):
+        if barcode_data.startswith('0@'):
+            return barcode_data[2:], '已排产'
+        elif barcode_data.startswith('1@'):
             return barcode_data[2:], '已切割'
         elif barcode_data.startswith('2@'):
             return barcode_data[2:], '已清角'
         elif barcode_data.startswith('3@'):
             return barcode_data[2:], '已入库'
+        elif barcode_data.startswith('4@'):
+            return barcode_data[2:], '部分出库'
+        elif barcode_data.startswith('5@'):
+            return barcode_data[2:], '已出库'
         else:
             return barcode_data, None
-    
-    def test_connection(self) -> bool:
-        """测试数据库连接"""
-        if not self.api_url or not self.headers:
-            return False
-        
-        try:
-            response = requests.get(
-                f"{self.api_url}/barcode_scans?limit=1",
-                headers=self.headers,
-                timeout=5
-            )
-            return response.status_code == 200
-        except Exception as e:
-            self.logger.error(f"数据库连接测试失败: {e}")
-            return False
-    
+
     def upload_scan_data(self, barcode_data: str, device_port: str) -> bool:
         """
-        上传扫描数据
+        上传扫描数据 - 使用现有barcode_scans表
         
         Args:
             barcode_data: 条码数据
@@ -128,15 +118,77 @@ class DatabaseManagerHTTP:
             # 解析条码数据中的状态信息
             clean_barcode_data, status = self._parse_barcode_status(barcode_data)
             
+            if not status:
+                self.logger.warning(f"无法识别状态的条码: {barcode_data}")
+                return False
+            
+            # 首先检查记录是否存在
+            existing_record = self._get_existing_record(clean_barcode_data)
+            
+            if existing_record:
+                # 更新现有记录
+                return self._update_existing_record(existing_record, status, device_port)
+            else:
+                # 创建新记录
+                return self._create_new_record(clean_barcode_data, status, device_port)
+                
+        except Exception as e:
+            self.logger.error(f"扫描数据上传失败: {e}")
+            # 上传失败时保存到本地
+            if self.config['local_backup_enabled']:
+                return self._save_to_local(barcode_data, device_port)
+            return False
+
+    def _get_existing_record(self, barcode_data: str) -> dict:
+        """获取现有记录"""
+        try:
+            response = requests.get(
+                f"{self.api_url}/barcode_scans?barcode_data=eq.{barcode_data}",
+                headers=self.headers,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                records = response.json()
+                return records[0] if records else None
+            else:
+                self.logger.error(f"查询现有记录失败: HTTP {response.status_code}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"查询现有记录失败: {e}")
+            return None
+
+    def _create_new_record(self, barcode_data: str, status: str, device_port: str) -> bool:
+        """创建新记录 - 兼容现有表结构"""
+        try:
+            current_time = datetime.now().isoformat()
+            
+            # 构建新记录数据 - 只使用存在的字段
             scan_data = {
-                'barcode_data': clean_barcode_data,
-                'device_port': device_port,
-                'scan_time': datetime.now().isoformat(),
-                'status': status
+                'barcode_data': barcode_data,
+                'device_port': device_port
             }
             
-            self.logger.debug(f"尝试上传扫描数据: {scan_data}")
+            # 根据状态添加对应的状态字段
+            if status:
+                status_mapping = {
+                    '已排产': ('status_1_scheduled', 'status_1_time'),
+                    '已切割': ('status_2_cut', 'status_2_time'),
+                    '已清角': ('status_3_cleaned', 'status_3_time'),
+                    '已入库': ('status_4_stored', 'status_4_time'),
+                    '部分出库': ('status_5_partial_out', 'status_5_time'),
+                    '已出库': ('status_6_shipped', 'status_6_time')
+                }
+                
+                if status in status_mapping:
+                    status_field, time_field = status_mapping[status]
+                    scan_data[status_field] = True
+                    scan_data[time_field] = current_time
             
+            self.logger.debug(f"尝试创建记录，数据: {scan_data}")
+            
+            # 执行插入
             response = requests.post(
                 f"{self.api_url}/barcode_scans",
                 headers=self.headers,
@@ -145,25 +197,188 @@ class DatabaseManagerHTTP:
             )
             
             if response.status_code in [200, 201]:
-                self.logger.info(f"扫描数据上传成功: {clean_barcode_data} (状态: {status or '无'})")
+                self.logger.info(f"新条码记录创建成功: {barcode_data} (状态: {status})")
                 # 同时保存到本地备份（如果启用）
                 if self.config['local_backup_enabled']:
-                    self._save_to_local(barcode_data, device_port)
+                    self._save_to_local(f"{self._get_status_prefix(status)}@{barcode_data}", device_port)
                 return True
             else:
-                self.logger.error(f"扫描数据上传失败: HTTP {response.status_code}")
-                # 上传失败时保存到本地
-                if self.config['local_backup_enabled']:
-                    return self._save_to_local(barcode_data, device_port)
+                # 记录详细的错误信息
+                error_text = response.text if hasattr(response, 'text') else 'Unknown error'
+                self.logger.error(f"新条码记录创建失败: HTTP {response.status_code}, 响应: {error_text}")
+                self.logger.error(f"发送的数据: {scan_data}")
+                
+                # 如果是400错误，可能是字段不存在，尝试只用基本字段重试
+                if response.status_code == 400:
+                    return self._create_basic_record(barcode_data, status, device_port)
+                
                 return False
                 
         except Exception as e:
-            self.logger.error(f"扫描数据上传失败: {e}")
-            # 上传失败时保存到本地
-            if self.config['local_backup_enabled']:
-                return self._save_to_local(barcode_data, device_port)
+            self.logger.error(f"创建新记录失败: {e}")
             return False
-    
+
+    def _create_basic_record(self, barcode_data: str, status: str, device_port: str) -> bool:
+        """创建基本记录 - 只使用最基本字段"""
+        try:
+            # 只使用最基本的字段
+            scan_data = {
+                'barcode_data': barcode_data,
+                'device_port': device_port
+            }
+            
+            self.logger.debug(f"尝试创建基本记录，数据: {scan_data}")
+            
+            # 执行插入
+            response = requests.post(
+                f"{self.api_url}/barcode_scans",
+                headers=self.headers,
+                json=scan_data,
+                timeout=10
+            )
+            
+            if response.status_code in [200, 201]:
+                self.logger.info(f"基本条码记录创建成功: {barcode_data}")
+                # 同时保存到本地备份（如果启用）
+                if self.config['local_backup_enabled']:
+                    self._save_to_local(f"{self._get_status_prefix(status)}@{barcode_data}", device_port)
+                return True
+            else:
+                error_text = response.text if hasattr(response, 'text') else 'Unknown error'
+                self.logger.error(f"基本条码记录创建失败: HTTP {response.status_code}, 响应: {error_text}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"创建基本记录失败: {e}")
+            return False
+
+    def _update_existing_record(self, existing_record: dict, status: str, device_port: str) -> bool:
+        """更新现有记录的状态 - 兼容现有表结构"""
+        try:
+            current_time = datetime.now().isoformat()
+            
+            # 构建更新数据 - 只使用存在的字段
+            update_data = {
+                'device_port': device_port
+            }
+            
+            # 根据状态添加对应的状态字段
+            if status:
+                status_mapping = {
+                    '已排产': ('status_1_scheduled', 'status_1_time'),
+                    '已切割': ('status_2_cut', 'status_2_time'),
+                    '已清角': ('status_3_cleaned', 'status_3_time'),
+                    '已入库': ('status_4_stored', 'status_4_time'),
+                    '部分出库': ('status_5_partial_out', 'status_5_time'),
+                    '已出库': ('status_6_shipped', 'status_6_time')
+                }
+                
+                if status in status_mapping:
+                    status_field, time_field = status_mapping[status]
+                    update_data[status_field] = True
+                    update_data[time_field] = current_time
+            
+            self.logger.debug(f"尝试更新记录，数据: {update_data}")
+            
+            # 执行更新
+            response = requests.patch(
+                f"{self.api_url}/barcode_scans?id=eq.{existing_record['id']}",
+                headers=self.headers,
+                json=update_data,
+                timeout=10
+            )
+            
+            if response.status_code in [200, 204]:
+                self.logger.info(f"条码状态更新成功: {existing_record['barcode_data']} -> {status}")
+                # 同时保存到本地备份（如果启用）
+                if self.config['local_backup_enabled']:
+                    self._save_to_local(f"{self._get_status_prefix(status)}@{existing_record['barcode_data']}", device_port)
+                return True
+            else:
+                error_text = response.text if hasattr(response, 'text') else 'Unknown error'
+                self.logger.error(f"条码状态更新失败: HTTP {response.status_code}, 响应: {error_text}")
+                self.logger.error(f"发送的数据: {update_data}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"更新现有记录失败: {e}")
+            return False
+
+    def _get_status_prefix(self, status: str) -> str:
+        """根据状态获取前缀"""
+        prefix_mapping = {
+            '已排产': '0',
+            '已切割': '1',
+            '已清角': '2',
+            '已入库': '3',
+            '部分出库': '4',
+            '已出库': '5'
+        }
+        return prefix_mapping.get(status, '')
+
+    def test_connection(self) -> bool:
+        """测试数据库连接"""
+        if not self.api_url or not self.headers:
+            return False
+        
+        try:
+            response = requests.get(
+                f"{self.api_url}/barcode_scans?limit=1",
+                headers=self.headers,
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                self.logger.info("数据库连接测试成功")
+                return True
+            else:
+                self.logger.error(f"数据库连接测试失败: HTTP {response.status_code}")
+                return False
+        except Exception as e:
+            self.logger.error(f"数据库连接测试失败: {e}")
+            return False
+
+    def get_scan_statistics(self) -> Dict[str, Any]:
+        """获取扫描统计信息 - 使用视图查询"""
+        if not self.api_url:
+            return self._get_local_statistics()
+        
+        try:
+            # 使用视图查询统计数据
+            response = requests.get(
+                f"{self.api_url}/barcode_scans_with_status?select=current_status",
+                headers=self.headers,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                records = response.json()
+                
+                # 统计各状态数量
+                status_counts = {}
+                for record in records:
+                    status = record.get('current_status', '未知状态')
+                    status_counts[status] = status_counts.get(status, 0) + 1
+                
+                stats = {
+                    '已排产': status_counts.get('已排产', 0),
+                    '已切割': status_counts.get('已切割', 0),
+                    '已清角': status_counts.get('已清角', 0),
+                    '已入库': status_counts.get('已入库', 0),
+                    '部分出库': status_counts.get('部分出库', 0),
+                    '已出库': status_counts.get('已出库', 0),
+                    'total': len(records)
+                }
+                
+                return stats
+            else:
+                self.logger.error(f"获取统计信息失败: HTTP {response.status_code}")
+                return self._get_local_statistics()
+                
+        except Exception as e:
+            self.logger.error(f"获取统计信息失败: {e}")
+            return self._get_local_statistics()
+
     def _save_to_local(self, barcode_data: str, device_port: str) -> bool:
         """保存数据到本地文件（备份/离线模式）"""
         if not self.config['local_backup_enabled']:
@@ -279,17 +494,59 @@ class DatabaseManagerHTTP:
         return uploaded_count
 
 
-# 全局数据库管理器实例
-db_manager = DatabaseManagerHTTP()
+# 在文件末尾添加全局函数，保持与主程序的兼容性
+
+# 创建全局数据库管理器实例
+_db_manager = DatabaseManagerHTTP()
+
+def upload_scan_data(barcode_data: str, device_port: str) -> bool:
+    """
+    全局函数：上传扫描数据
+    直接调用版本
+    
+    Args:
+        barcode_data: 条码数据
+        device_port: 设备端口
+        
+    Returns:
+        上传是否成功
+    """
+    return _db_manager.upload_scan_data(barcode_data, device_port)
 
 def upload_barcode_scan(barcode_data: str, device_port: str) -> bool:
-    """上传条码扫描数据"""
-    return db_manager.upload_scan_data(barcode_data, device_port)
+    """
+    全局函数：上传条码扫描数据
+    保持与主程序的兼容性
+    
+    Args:
+        barcode_data: 条码数据
+        device_port: 设备端口
+        
+    Returns:
+        上传是否成功
+    """
+    return _db_manager.upload_scan_data(barcode_data, device_port)
 
 def sync_local_data() -> int:
-    """同步本地数据到数据库"""
-    return db_manager.sync_local_data()
+    """
+    全局函数：同步本地数据到数据库
+    保持与主程序的兼容性
+    
+    Returns:
+        同步的记录数量
+    """
+    return _db_manager.sync_local_data()
+
+def get_scan_statistics() -> dict:
+    """
+    全局函数：获取扫描统计信息
+    保持与主程序的兼容性
+    
+    Returns:
+        统计信息字典
+    """
+    return _db_manager.get_scan_statistics()
 
 def test_database_connection() -> bool:
     """测试数据库连接"""
-    return db_manager.test_connection()
+    return _db_manager.test_connection()

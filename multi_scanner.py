@@ -1093,14 +1093,19 @@ class MultiScannerApp:
         """异步上传数据到数据库"""
         def upload_worker():
             try:
-                success = db.upload_barcode_scan(
+                # 修正方法名：从 upload_barcode_scan 改为 upload_scan_data
+                success = db.upload_scan_data(
                     barcode_data=data,
                     device_port=device.port
                 )
-                if not success:
+                if success:
+                    self.root.after(0, lambda: self.add_log(f"✅ {device.device_name} 数据上传成功: {data}"))
+                else:
                     self.root.after(0, lambda: self.add_log(f"⚠️ {device.device_name} 数据上传失败: {data}"))
             except Exception as e:
-                self.root.after(0, lambda: self.add_log(f"⚠️ {device.device_name} 数据库上传错误: {e}"))
+                # 修复：将异常信息传递给 lambda 函数作为参数
+                error_msg = str(e)
+                self.root.after(0, lambda msg=error_msg: self.add_log(f"⚠️ {device.device_name} 数据库上传错误: {msg}"))
 
         threading.Thread(target=upload_worker, daemon=True).start()
     
@@ -1335,7 +1340,14 @@ class MultiScannerApp:
             return
         
         try:
-            synced_count = db.sync_local_data()
+            if hasattr(db, 'DatabaseManagerHTTP'):
+                # 使用HTTP版本的数据库管理器
+                db_manager = db.DatabaseManagerHTTP()
+                synced_count = db_manager.sync_local_data()
+            else:
+                # 兼容旧版本
+                synced_count = db.sync_local_data()
+                
             if synced_count > 0:
                 self.add_log(f"📤 已同步 {synced_count} 条本地数据到数据库")
             else:
@@ -1490,7 +1502,14 @@ class MultiScannerApp:
             # 同步数据 (同步执行，确保完成)
             if DATABASE_AVAILABLE:
                 try:
-                    synced_count = db.sync_local_data()
+                    if hasattr(db, 'DatabaseManagerHTTP'):
+                        # 使用HTTP版本的数据库管理器
+                        db_manager = db.DatabaseManagerHTTP()
+                        synced_count = db_manager.sync_local_data()
+                    else:
+                        # 兼容旧版本
+                        synced_count = db.sync_local_data()
+                    
                     if synced_count > 0:
                         self.add_log(f"📤 已同步 {synced_count} 条本地数据到数据库")
                     else:
