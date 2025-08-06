@@ -676,30 +676,169 @@ class MultiScannerApp:
             if device.is_connected:
                 self.disconnect_device(device)
     
+    def cleanup_system_serial_resources(self, port):
+        """系统级串口资源清理"""
+        try:
+            import subprocess
+            import psutil
+            
+            self.add_log(f"🔧 正在清理 {port} 的系统资源...")
+            
+            # 方法1: 使用Windows命令行工具清理串口资源
+            try:
+                # 使用mode命令重置串口状态
+                subprocess.run(['mode', port, 'baud=9600', 'parity=n', 'data=8', 'stop=1'], 
+                             capture_output=True, timeout=5)
+                time.sleep(0.5)
+            except:
+                pass
+            
+            # 方法2: 查找并结束可能占用串口的进程
+            try:
+                for proc in psutil.process_iter(['pid', 'name', 'connections']):
+                    try:
+                        connections = proc.info['connections']
+                        if connections:
+                            for conn in connections:
+                                # 检查是否有进程占用串口相关资源
+                                if hasattr(conn, 'laddr') and str(conn.laddr).find(port.replace('COM', '')) != -1:
+                                    self.add_log(f"⚠️ 发现进程 {proc.info['name']} (PID: {proc.info['pid']}) 可能占用 {port}")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+            except ImportError:
+                pass
+            
+            # 方法3: 尝试多次短暂打开关闭来清理资源
+            for i in range(3):
+                try:
+                    temp_serial = serial.Serial(port, timeout=0.1)
+                    temp_serial.close()
+                    time.sleep(0.2)
+                except:
+                    time.sleep(0.5)
+            
+            self.add_log(f"✅ {port} 系统资源清理完成")
+            return True
+            
+        except Exception as e:
+            self.add_log(f"⚠️ {port} 系统资源清理失败: {e}")
+            return False
+
+    def try_alternative_connection_methods(self, device):
+        """尝试替代连接方法"""
+        self.add_log(f"🔄 {device.device_name} 尝试替代连接方法...")
+        
+        # 方法1: 尝试不同的串口参数组合
+        alternative_params = [
+            {'baudrate': 9600, 'timeout': 1, 'write_timeout': 1},
+            {'baudrate': 115200, 'timeout': 2, 'write_timeout': 2},
+            {'baudrate': 9600, 'timeout': 0.5, 'write_timeout': 0.5, 'inter_byte_timeout': 0.1},
+        ]
+        
+        for i, params in enumerate(alternative_params):
+            try:
+                self.add_log(f"🔧 {device.device_name} 尝试参数组合 {i+1}...")
+                
+                # 先清理系统资源
+                self.cleanup_system_serial_resources(device.port)
+                time.sleep(1)
+                
+                # 尝试连接
+                device.serial_connection = serial.Serial(
+                    port=device.port,
+                    baudrate=params['baudrate'],
+                    bytesize=device.databits,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=params['timeout'],
+                    write_timeout=params.get('write_timeout'),
+                    inter_byte_timeout=params.get('inter_byte_timeout')
+                )
+                
+                device.is_connected = True
+                device.reconnect_attempts = 0
+                self.add_log(f"✅ {device.device_name} 替代方法连接成功 (方法{i+1})")
+                return True
+                
+            except Exception as e:
+                self.add_log(f"❌ {device.device_name} 替代方法 {i+1} 失败: {e}")
+                if device.serial_connection:
+                    try:
+                        device.serial_connection.close()
+                    except:
+                        pass
+                    device.serial_connection = None
+                time.sleep(0.5)
+        
+        # 方法2: 尝试使用不同的打开模式
+        try:
+            self.add_log(f"🔧 {device.device_name} 尝试独占模式连接...")
+            self.cleanup_system_serial_resources(device.port)
+            time.sleep(2)
+            
+            device.serial_connection = serial.Serial()
+            device.serial_connection.port = device.port
+            device.serial_connection.baudrate = device.baudrate
+            device.serial_connection.bytesize = device.databits
+            device.serial_connection.parity = serial.PARITY_NONE
+            device.serial_connection.stopbits = serial.STOPBITS_ONE
+            device.serial_connection.timeout = 1
+            device.serial_connection.exclusive = True  # 独占模式
+            
+            device.serial_connection.open()
+            device.is_connected = True
+            device.reconnect_attempts = 0
+            self.add_log(f"✅ {device.device_name} 独占模式连接成功")
+            return True
+            
+        except Exception as e:
+            self.add_log(f"❌ {device.device_name} 独占模式连接失败: {e}")
+            if device.serial_connection:
+                try:
+                    device.serial_connection.close()
+                except:
+                    pass
+                device.serial_connection = None
+        
+        return False
+
     def connect_device(self, device):
-        """连接单个设备"""
+        """连接单个设备 - 增强版"""
         try:
             # 确保设备完全断开
             self.force_disconnect_device(device)
             
-            # 等待一小段时间确保资源释放
-            time.sleep(0.1)
+            # 对于问题设备，先进行系统级资源清理
+            if device.port in ['COM4', 'COM6']:
+                self.cleanup_system_serial_resources(device.port)
+                time.sleep(2.0)
+            else:
+                time.sleep(0.1)
             
+            # 尝试标准连接
             params = device.get_serial_params()
             device.serial_connection = serial.Serial(port=device.port, **params)
             device.is_connected = True
-            device.reconnect_attempts = 0  # 重置重连计数
-            
-
+            device.reconnect_attempts = 0
             
             self.add_log(f"✅ {device.device_name} 连接成功")
             self.start_device_scanning(device)
             self.update_device_list()
             
         except Exception as e:
-            self.add_log(f"❌ {device.device_name} 连接失败: {e}")
+            self.add_log(f"❌ {device.device_name} 标准连接失败: {e}")
             
-            # 检查是否是连接相关的错误
+            # 检查是否是权限错误
+            if "PermissionError" in str(e) or "13" in str(e):
+                self.add_log(f"🔧 {device.device_name} 检测到权限错误，尝试替代连接方法...")
+                
+                # 尝试替代连接方法
+                if self.try_alternative_connection_methods(device):
+                    self.start_device_scanning(device)
+                    self.update_device_list()
+                    return
+            
+            # 标准重试逻辑
             connection_errors = ['device attached to the system is not functioning', 
                                'permission', 'access', 'device not found', 
                                'could not open port', 'serial exception']
@@ -708,18 +847,22 @@ class MultiScannerApp:
             is_connection_error = any(err.lower() in error_str for err in connection_errors)
             
             if is_connection_error:
-                self.add_log(f"🔌 {device.device_name} 检测到连接问题，尝试重试后启动自动重连...")
+                self.add_log(f"🔌 {device.device_name} 检测到连接问题，尝试重试...")
             
-            # 尝试强制清理资源后重试一次
+            # 最后的重试尝试
             try:
                 self.force_disconnect_device(device)
-                time.sleep(0.5)
+                
+                if device.port in ['COM4', 'COM6']:
+                    self.cleanup_system_serial_resources(device.port)
+                    time.sleep(3.0)
+                else:
+                    time.sleep(0.5)
+                
                 params = device.get_serial_params()
                 device.serial_connection = serial.Serial(port=device.port, **params)
                 device.is_connected = True
-                device.reconnect_attempts = 0  # 重置重连计数
-                
-
+                device.reconnect_attempts = 0
                 
                 self.add_log(f"✅ {device.device_name} 重试连接成功")
                 self.start_device_scanning(device)
@@ -728,21 +871,22 @@ class MultiScannerApp:
             except Exception as retry_e:
                 self.add_log(f"❌ {device.device_name} 重试连接也失败: {retry_e}")
                 
-                # 检查是否是连接相关的错误，如果是则启动自动重连
-                connection_errors = ['device attached to the system is not functioning', 
-                                   'permission', 'access', 'device not found', 
-                                   'could not open port', 'serial exception']
+                # 如果仍然是权限错误，尝试替代方法
+                if "PermissionError" in str(retry_e) or "13" in str(retry_e):
+                    if self.try_alternative_connection_methods(device):
+                        self.start_device_scanning(device)
+                        self.update_device_list()
+                        return
                 
+                # 启动自动重连
                 error_str = str(retry_e).lower()
                 is_connection_error = any(err.lower() in error_str for err in connection_errors)
                 
                 if is_connection_error:
-                    self.add_log(f"🔌 {device.device_name} 检测到连接问题，启动自动重连...")
-                    # 启动自动重连
-                    threading.Thread(target=self.auto_reconnect_device, args=(device,), daemon=True).start()
+                    self.add_log(f"🔌 {device.device_name} 启动智能重连...")
+                    threading.Thread(target=self.smart_reconnect_device, args=(device,), daemon=True).start()
                 else:
-                    # 非连接错误，显示错误对话框
-                    messagebox.showerror("连接失败", f"{device.device_name} 连接失败:\n原始错误: {e}\n重试错误: {retry_e}\n\n建议:\n1. 检查设备是否正常工作\n2. 尝试重新插拔设备\n3. 检查其他程序是否占用该端口")
+                    messagebox.showerror("连接失败", f"{device.device_name} 连接失败:\n原始错误: {e}\n重试错误: {retry_e}\n\n建议:\n1. 尝试更换USB端口\n2. 检查设备驱动程序\n3. 重启程序")
     
     def disconnect_device(self, device):
         """断开单个设备"""
@@ -772,9 +916,8 @@ class MultiScannerApp:
             
             # 等待扫描线程结束
             if hasattr(device, 'scan_thread') and device.scan_thread and device.scan_thread.is_alive():
-                device.scan_thread.join(timeout=2.0)  # 增加等待时间
+                device.scan_thread.join(timeout=2.0)
                 
-                # 如果线程仍然活跃，强制结束
                 if device.scan_thread.is_alive():
                     self.add_log(f"⚠️ {device.device_name} 扫描线程未能正常结束")
             
@@ -785,30 +928,36 @@ class MultiScannerApp:
                         # 取消所有待处理的读写操作
                         try:
                             device.serial_connection.cancel_read()
-                        except AttributeError:
-                            pass  # 某些版本的pyserial可能没有这个方法
+                        except (AttributeError, OSError):
+                            pass
                         try:
                             device.serial_connection.cancel_write()
-                        except AttributeError:
-                            pass  # 某些版本的pyserial可能没有这个方法
+                        except (AttributeError, OSError):
+                            pass
+                        
                         # 刷新缓冲区
                         try:
                             device.serial_connection.flush()
                             device.serial_connection.flushInput()
                             device.serial_connection.flushOutput()
                         except AttributeError:
-                            # 新版本pyserial使用不同的方法名
                             try:
                                 device.serial_connection.flush()
                                 device.serial_connection.reset_input_buffer()
                                 device.serial_connection.reset_output_buffer()
-                            except:
+                            except (AttributeError, OSError):
                                 pass
+                        except OSError:
+                            pass
+                        
                         # 关闭连接
                         device.serial_connection.close()
                         
-                    # 额外等待确保系统释放资源
-                    time.sleep(0.2)
+                    # 对于问题设备，增加更长的等待时间
+                    if device.port in ['COM4', 'COM6']:  # 根据实际情况调整
+                        time.sleep(1.0)  # 增加等待时间
+                    else:
+                        time.sleep(0.2)
                     
                 except Exception as close_error:
                     self.add_log(f"⚠️ {device.device_name} 关闭串口时出错: {close_error}")
@@ -825,7 +974,6 @@ class MultiScannerApp:
             self.add_log(f"✅ {device.device_name} 连接已强制断开")
             
         except Exception as e:
-            # 即使强制断开失败也要重置状态
             device.is_connected = False
             device.serial_connection = None
             device.is_scanning = False
@@ -982,6 +1130,61 @@ class MultiScannerApp:
         
         self.update_device_list()
     
+    def smart_reconnect_device(self, device):
+        """智能重连设备 - 使用多种策略"""
+        current_time = time.time()
+        
+        # 防止频繁重连
+        if device.last_error_time and (current_time - device.last_error_time) < 10:
+            return
+        
+        device.last_error_time = current_time
+        device.reconnect_attempts += 1
+        
+        if device.reconnect_attempts > device.max_reconnect_attempts:
+            self.root.after(0, lambda: self.add_log(f"❌ {device.device_name} 智能重连次数超限，请手动处理"))
+            return
+        
+        self.root.after(0, lambda: self.add_log(f"🧠 {device.device_name} 第{device.reconnect_attempts}次智能重连..."))
+        
+        # 使用递增等待时间
+        wait_time = min(10 * device.reconnect_attempts, 60)  # 最多等待60秒
+        time.sleep(wait_time)
+        
+        try:
+            # 强制断开
+            self.force_disconnect_device(device)
+            
+            # 系统级资源清理
+            self.cleanup_system_serial_resources(device.port)
+            time.sleep(2)
+            
+            # 尝试替代连接方法
+            if self.try_alternative_connection_methods(device):
+                device.reconnect_attempts = 0
+                self.root.after(0, lambda: self.add_log(f"✅ {device.device_name} 智能重连成功"))
+                self.root.after(0, lambda: self.start_device_scanning(device))
+                self.root.after(0, lambda: self.update_device_list())
+                return
+            
+            # 如果替代方法也失败，尝试标准方法
+            params = device.get_serial_params()
+            device.serial_connection = serial.Serial(port=device.port, **params)
+            device.is_connected = True
+            device.reconnect_attempts = 0
+            
+            self.root.after(0, lambda: self.add_log(f"✅ {device.device_name} 智能重连成功"))
+            self.root.after(0, lambda: self.start_device_scanning(device))
+            self.root.after(0, lambda: self.update_device_list())
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.root.after(0, lambda msg=error_msg: self.add_log(f"❌ {device.device_name} 智能重连失败: {msg}"))
+            
+            # 如果还有重连机会，继续尝试
+            if device.reconnect_attempts < device.max_reconnect_attempts:
+                threading.Thread(target=self.smart_reconnect_device, args=(device,), daemon=True).start()
+
     def auto_reconnect_device(self, device):
         """自动重连设备"""
         current_time = time.time()
@@ -999,30 +1202,38 @@ class MultiScannerApp:
         
         self.root.after(0, lambda: self.add_log(f"🔄 {device.device_name} 第{device.reconnect_attempts}次重连尝试..."))
         
-        # 等待一段时间再重连
-        time.sleep(2 * device.reconnect_attempts)  # 递增等待时间
+        # 对于问题设备，使用更长的等待时间
+        if device.port in ['COM4', 'COM6']:
+            wait_time = 5 * device.reconnect_attempts  # 更长的递增等待时间
+        else:
+            wait_time = 2 * device.reconnect_attempts
+        
+        time.sleep(wait_time)
         
         try:
             # 强制断开
             self.force_disconnect_device(device)
-            time.sleep(1)
+            
+            # 对于问题设备，增加更长的等待时间
+            if device.port in ['COM4', 'COM6']:
+                time.sleep(2.0)
+            else:
+                time.sleep(1.0)
             
             # 尝试重连
             params = device.get_serial_params()
             device.serial_connection = serial.Serial(port=device.port, **params)
             device.is_connected = True
-            device.reconnect_attempts = 0  # 重置重连计数
-            
-
+            device.reconnect_attempts = 0
             
             self.root.after(0, lambda: self.add_log(f"✅ {device.device_name} 自动重连成功"))
             self.root.after(0, lambda: self.start_device_scanning(device))
             self.root.after(0, lambda: self.update_device_list())
             
         except Exception as e:
-            # 修复变量作用域问题：将异常信息保存到局部变量
             error_msg = str(e)
             self.root.after(0, lambda msg=error_msg: self.add_log(f"❌ {device.device_name} 自动重连失败: {msg}"))
+            
             # 如果还有重连机会，继续尝试
             if device.reconnect_attempts < device.max_reconnect_attempts:
                 threading.Thread(target=self.auto_reconnect_device, args=(device,), daemon=True).start()
