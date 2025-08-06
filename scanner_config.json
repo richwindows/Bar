@@ -1,7 +1,7 @@
 {
     "ports": [
-        "COM4",
         "COM5",
+        "COM4",
         "COM6"
     ],
     "sound_enabled": true

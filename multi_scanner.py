@@ -133,6 +133,9 @@ class MultiScannerApp:
         self.root.geometry("1100x700")
         self.root.minsize(950, 600)
         
+        # 在初始化时清理可能的孤立串口连接
+        self.cleanup_orphaned_serial_connections()
+        
         # 设置现代化主题
         self.setup_theme()
         
@@ -769,17 +772,46 @@ class MultiScannerApp:
             
             # 等待扫描线程结束
             if hasattr(device, 'scan_thread') and device.scan_thread and device.scan_thread.is_alive():
-                device.scan_thread.join(timeout=1.0)
+                device.scan_thread.join(timeout=2.0)  # 增加等待时间
+                
+                # 如果线程仍然活跃，强制结束
+                if device.scan_thread.is_alive():
+                    self.add_log(f"⚠️ {device.device_name} 扫描线程未能正常结束")
             
             # 强制关闭串口连接
             if device.serial_connection:
                 try:
                     if device.serial_connection.is_open:
-                        device.serial_connection.cancel_read()
-                        device.serial_connection.cancel_write()
+                        # 取消所有待处理的读写操作
+                        try:
+                            device.serial_connection.cancel_read()
+                        except AttributeError:
+                            pass  # 某些版本的pyserial可能没有这个方法
+                        try:
+                            device.serial_connection.cancel_write()
+                        except AttributeError:
+                            pass  # 某些版本的pyserial可能没有这个方法
+                        # 刷新缓冲区
+                        try:
+                            device.serial_connection.flush()
+                            device.serial_connection.flushInput()
+                            device.serial_connection.flushOutput()
+                        except AttributeError:
+                            # 新版本pyserial使用不同的方法名
+                            try:
+                                device.serial_connection.flush()
+                                device.serial_connection.reset_input_buffer()
+                                device.serial_connection.reset_output_buffer()
+                            except:
+                                pass
+                        # 关闭连接
                         device.serial_connection.close()
-                except:
-                    pass  # 忽略关闭时的错误
+                        
+                    # 额外等待确保系统释放资源
+                    time.sleep(0.2)
+                    
+                except Exception as close_error:
+                    self.add_log(f"⚠️ {device.device_name} 关闭串口时出错: {close_error}")
                 
                 # 清空连接对象
                 device.serial_connection = None
@@ -787,14 +819,19 @@ class MultiScannerApp:
             # 重置设备状态
             device.is_connected = False
             device.last_scan_time = None
-            device.reconnect_attempts = 0  # 重置重连计数
+            device.reconnect_attempts = 0
+            device.scan_thread = None
+            
+            self.add_log(f"✅ {device.device_name} 连接已强制断开")
             
         except Exception as e:
             # 即使强制断开失败也要重置状态
             device.is_connected = False
             device.serial_connection = None
             device.is_scanning = False
-            device.reconnect_attempts = 0  # 重置重连计数
+            device.reconnect_attempts = 0
+            device.scan_thread = None
+            self.add_log(f"⚠️ {device.device_name} 强制断开时出错: {e}")
     
     def start_device_scanning(self, device):
         """开始单个设备扫描"""
@@ -1224,35 +1261,63 @@ class MultiScannerApp:
     
     def on_closing(self):
         """程序关闭处理"""
-        # 保存当天扫描数据
-        self.save_today_scanned_data()
-        
-        # 停止所有扫描
-        self.stop_all_scanning()
-        
-        # 断开所有设备
-        self.disconnect_all_devices()
-        
-        # 保存设备配置
-        self.save_devices()
-
-        # 同步数据 (异步)
-        if DATABASE_AVAILABLE:
-            threading.Thread(target=self.async_sync_data, daemon=True).start()
-
-        # 立即销毁窗口
-        self.root.destroy()
-
-    def async_sync_data(self):
-        """异步同步数据"""
         try:
-            synced_count = db.sync_local_data()
-            if synced_count > 0:
-                print(f"📤 已同步 {synced_count} 条本地数据到数据库")  # 使用print因为UI已销毁
-            else:
-                print("📤 没有需要同步的本地数据")
+            self.add_log("🔄 正在关闭程序，请稍候...")
+            
+            # 保存当天扫描数据
+            self.save_today_scanned_data()
+            
+            # 停止所有扫描
+            self.stop_all_scanning()
+            
+            # 强制断开所有设备并等待资源释放
+            self.force_disconnect_all_devices()
+            
+            # 保存设备配置
+            self.save_devices()
+
+            # 同步数据 (同步执行，确保完成)
+            if DATABASE_AVAILABLE:
+                try:
+                    synced_count = db.sync_local_data()
+                    if synced_count > 0:
+                        self.add_log(f"📤 已同步 {synced_count} 条本地数据到数据库")
+                    else:
+                        self.add_log("📤 没有需要同步的本地数据")
+                except Exception as e:
+                    self.add_log(f"⚠️ 数据同步失败: {e}")
+            
+            self.add_log("✅ 程序关闭完成")
+            
+            # 等待一段时间确保所有资源释放
+            time.sleep(1.0)
+            
         except Exception as e:
-            print(f"⚠️ 数据同步失败: {e}")
+            print(f"关闭程序时发生错误: {e}")
+        finally:
+            # 销毁窗口
+            self.root.destroy()
+
+    def force_disconnect_all_devices(self):
+        """强制断开所有设备并等待资源释放"""
+        self.add_log("🔌 正在断开所有设备连接...")
+        
+        # 停止所有扫描线程
+        for device in self.devices.values():
+            device.is_scanning = False
+        
+        # 等待扫描线程结束
+        time.sleep(0.5)
+        
+        # 强制断开所有设备
+        for device in self.devices.values():
+            if device.is_connected or device.serial_connection:
+                self.force_disconnect_device(device)
+        
+        # 额外等待时间确保Windows系统释放串口资源
+        time.sleep(1.0)
+        
+        self.add_log("✅ 所有设备已断开连接")
     
     def on_auto_connect_changed(self):
         """自动连接设置变化时的回调"""
@@ -1374,6 +1439,31 @@ class MultiScannerApp:
         tooltip = ToolTip(widget, text)
         self.tooltips.append(tooltip)
         return tooltip
+    
+    def cleanup_orphaned_serial_connections(self):
+        """清理可能的孤立串口连接"""
+        try:
+            import psutil
+            import serial.tools.list_ports
+            
+            # 获取所有可用串口
+            available_ports = [port.device for port in serial.tools.list_ports.comports()]
+            
+            # 尝试短暂打开和关闭每个串口以清理可能的孤立连接
+            for port in available_ports:
+                try:
+                    test_serial = serial.Serial(port, timeout=0.1)
+                    test_serial.close()
+                    time.sleep(0.1)
+                except:
+                    pass  # 忽略错误，继续处理下一个端口
+                    
+        except ImportError:
+            # 如果没有psutil模块，跳过清理
+            pass
+        except Exception as e:
+            if hasattr(self, 'add_log'):
+                self.add_log(f"⚠️ 串口资源清理时出错: {e}")
 
 
 class ToolTip:
@@ -1440,9 +1530,32 @@ def main():
     # 绑定关闭事件
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     
-    # 运行程序
-    root.mainloop()
+    try:
+        # 运行程序
+        root.mainloop()
+    except Exception as e:
+        print(f"主程序运行时发生错误: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # 确保窗口被销毁
+        try:
+            if root.winfo_exists():
+                root.destroy()
+        except:
+            pass
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("程序被用户中断")
+    except Exception as e:
+        print(f"程序运行时发生错误: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # 确保程序完全退出
+        import sys
+        sys.exit(0)

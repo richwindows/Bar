@@ -16,3 +16,7 @@
 {"barcode_data": "2@Rich-052125-16-05", "scan_time": "2025-08-05T14:41:44.217077", "device_port": "COM5", "synced": true}
 {"barcode_data": "2@Rich-052125-16-06", "scan_time": "2025-08-05T14:41:48.269817", "device_port": "COM5", "synced": true}
 {"barcode_data": "2@Rich-052125-16-07", "scan_time": "2025-08-05T14:41:49.294911", "device_port": "COM5", "synced": true}
+{"barcode_data": "Rich-052125-16-17", "scan_time": "2025-08-05T17:19:00.292197", "device_port": "COM5", "status": "已清角", "synced": true}
+{"barcode_data": "Rich-052125-16-05", "scan_time": "2025-08-05T17:19:01.443083", "device_port": "COM5", "status": "已清角", "synced": true}
+{"barcode_data": "Rich-052125-16-07", "scan_time": "2025-08-05T17:19:30.872185", "device_port": "COM5", "status": "已清角", "synced": true}
+{"barcode_data": "Rich-052125-16-08", "scan_time": "2025-08-05T17:19:34.583825", "device_port": "COM5", "status": "已清角", "synced": true}
