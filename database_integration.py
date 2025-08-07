@@ -357,6 +357,10 @@ def upload_barcode_scan(barcode_data: str, device_port: str) -> bool:
     """上传条码扫描数据"""
     return db_manager.upload_scan_data(barcode_data, device_port)
 
+def upload_scan_data(barcode_data: str, device_port: str) -> bool:
+    """上传扫描数据（兼容性函数）"""
+    return db_manager.upload_scan_data(barcode_data, device_port)
+
 
 
 def get_scan_history(limit: int = 50) -> List[Dict]:

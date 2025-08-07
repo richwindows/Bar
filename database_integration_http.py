@@ -9,6 +9,7 @@ import requests
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 import logging
+import pytz  # 添加时区支持
 
 # 加载环境变量
 try:
@@ -33,6 +34,9 @@ class DatabaseManagerHTTP:
         # 优先从环境变量读取配置
         self.supabase_url = supabase_url or os.getenv('SUPABASE_URL')
         self.supabase_key = supabase_key or os.getenv('SUPABASE_KEY')
+        
+        # 设置太平洋时区
+        self.pacific_timezone = pytz.timezone('America/Los_Angeles')
         
         # 构建API端点
         if self.supabase_url:
@@ -158,11 +162,22 @@ class DatabaseManagerHTTP:
         except Exception as e:
             self.logger.error(f"查询现有记录失败: {e}")
             return None
-
+    
+    def _get_pacific_time(self) -> str:
+        """获取本地时间，格式化为数据库兼容格式"""
+        # 直接使用本地时间，不进行时区转换
+        local_time = datetime.now()
+        
+        # 使用简单格式，不包含时区信息
+        formatted_time = local_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+        
+        return formatted_time
+    
     def _create_new_record(self, barcode_data: str, status: str, device_port: str) -> bool:
         """创建新记录 - 兼容现有表结构"""
         try:
-            current_time = datetime.now().isoformat()
+            # 使用本地时间存储到数据库
+            current_time = self._get_pacific_time()
             
             # 构建新记录数据 - 只使用存在的字段
             scan_data = {
@@ -197,7 +212,7 @@ class DatabaseManagerHTTP:
             )
             
             if response.status_code in [200, 201]:
-                self.logger.info(f"新条码记录创建成功: {barcode_data} (状态: {status})")
+                self.logger.info(f"新条码记录创建成功: {barcode_data} (状态: {status}) [本地时间: {current_time}]")
                 # 同时保存到本地备份（如果启用）
                 if self.config['local_backup_enabled']:
                     self._save_to_local(f"{self._get_status_prefix(status)}@{barcode_data}", device_port)
@@ -218,44 +233,11 @@ class DatabaseManagerHTTP:
             self.logger.error(f"创建新记录失败: {e}")
             return False
 
-    def _create_basic_record(self, barcode_data: str, status: str, device_port: str) -> bool:
-        """创建基本记录 - 只使用最基本字段"""
-        try:
-            # 只使用最基本的字段
-            scan_data = {
-                'barcode_data': barcode_data,
-                'device_port': device_port
-            }
-            
-            self.logger.debug(f"尝试创建基本记录，数据: {scan_data}")
-            
-            # 执行插入
-            response = requests.post(
-                f"{self.api_url}/barcode_scans",
-                headers=self.headers,
-                json=scan_data,
-                timeout=10
-            )
-            
-            if response.status_code in [200, 201]:
-                self.logger.info(f"基本条码记录创建成功: {barcode_data}")
-                # 同时保存到本地备份（如果启用）
-                if self.config['local_backup_enabled']:
-                    self._save_to_local(f"{self._get_status_prefix(status)}@{barcode_data}", device_port)
-                return True
-            else:
-                error_text = response.text if hasattr(response, 'text') else 'Unknown error'
-                self.logger.error(f"基本条码记录创建失败: HTTP {response.status_code}, 响应: {error_text}")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"创建基本记录失败: {e}")
-            return False
-
     def _update_existing_record(self, existing_record: dict, status: str, device_port: str) -> bool:
         """更新现有记录的状态 - 兼容现有表结构"""
         try:
-            current_time = datetime.now().isoformat()
+            # 使用本地时间存储到数据库
+            current_time = self._get_pacific_time()
             
             # 构建更新数据 - 只使用存在的字段
             update_data = {
@@ -289,7 +271,7 @@ class DatabaseManagerHTTP:
             )
             
             if response.status_code in [200, 204]:
-                self.logger.info(f"条码状态更新成功: {existing_record['barcode_data']} -> {status}")
+                self.logger.info(f"条码状态更新成功: {existing_record['barcode_data']} -> {status} [本地时间: {current_time}]")
                 # 同时保存到本地备份（如果启用）
                 if self.config['local_backup_enabled']:
                     self._save_to_local(f"{self._get_status_prefix(status)}@{existing_record['barcode_data']}", device_port)
@@ -305,8 +287,8 @@ class DatabaseManagerHTTP:
             return False
 
     def _get_status_prefix(self, status: str) -> str:
-        """根据状态获取前缀"""
-        prefix_mapping = {
+        """根据状态获取对应的前缀"""
+        status_prefix_mapping = {
             '已排产': '0',
             '已切割': '1',
             '已清角': '2',
@@ -314,70 +296,7 @@ class DatabaseManagerHTTP:
             '部分出库': '4',
             '已出库': '5'
         }
-        return prefix_mapping.get(status, '')
-
-    def test_connection(self) -> bool:
-        """测试数据库连接"""
-        if not self.api_url or not self.headers:
-            return False
-        
-        try:
-            response = requests.get(
-                f"{self.api_url}/barcode_scans?limit=1",
-                headers=self.headers,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                self.logger.info("数据库连接测试成功")
-                return True
-            else:
-                self.logger.error(f"数据库连接测试失败: HTTP {response.status_code}")
-                return False
-        except Exception as e:
-            self.logger.error(f"数据库连接测试失败: {e}")
-            return False
-
-    def get_scan_statistics(self) -> Dict[str, Any]:
-        """获取扫描统计信息 - 使用视图查询"""
-        if not self.api_url:
-            return self._get_local_statistics()
-        
-        try:
-            # 使用视图查询统计数据
-            response = requests.get(
-                f"{self.api_url}/barcode_scans_with_status?select=current_status",
-                headers=self.headers,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                records = response.json()
-                
-                # 统计各状态数量
-                status_counts = {}
-                for record in records:
-                    status = record.get('current_status', '未知状态')
-                    status_counts[status] = status_counts.get(status, 0) + 1
-                
-                stats = {
-                    '已排产': status_counts.get('已排产', 0),
-                    '已切割': status_counts.get('已切割', 0),
-                    '已清角': status_counts.get('已清角', 0),
-                    '已入库': status_counts.get('已入库', 0),
-                    '部分出库': status_counts.get('部分出库', 0),
-                    '已出库': status_counts.get('已出库', 0),
-                    'total': len(records)
-                }
-                
-                return stats
-            else:
-                self.logger.error(f"获取统计信息失败: HTTP {response.status_code}")
-                return self._get_local_statistics()
-                
-        except Exception as e:
-            self.logger.error(f"获取统计信息失败: {e}")
-            return self._get_local_statistics()
+        return status_prefix_mapping.get(status, '')
 
     def _save_to_local(self, barcode_data: str, device_port: str) -> bool:
         """保存数据到本地文件（备份/离线模式）"""
@@ -388,9 +307,10 @@ class DatabaseManagerHTTP:
             # 解析条码数据中的状态信息
             clean_barcode_data, status = self._parse_barcode_status(barcode_data)
             
+            # 使用本地时间
             local_data = {
                 'barcode_data': clean_barcode_data,
-                'scan_time': datetime.now().isoformat(),
+                'scan_time': self._get_pacific_time(),
                 'device_port': device_port,
                 'status': status,
                 'synced': False
@@ -399,50 +319,22 @@ class DatabaseManagerHTTP:
             # 确保本地数据目录存在
             os.makedirs(self.local_data_dir, exist_ok=True)
             
-            # 生成文件名（按日期分组）
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            filename = f"scans_{date_str}.jsonl"
+            # 生成文件名（按日期分组，使用本地日期）
+            local_date = datetime.now().strftime('%Y-%m-%d')
+            filename = f"scans_{local_date}.jsonl"
             filepath = os.path.join(self.local_data_dir, filename)
             
             # 追加写入文件
             with open(filepath, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(local_data, ensure_ascii=False) + '\n')
             
-            self.logger.info(f"扫描数据保存到本地: {clean_barcode_data} (状态: {status or '无'})")
+            self.logger.info(f"扫描数据保存到本地: {clean_barcode_data} (状态: {status or '无'}) [本地时间]")
             return True
             
         except Exception as e:
             self.logger.error(f"本地保存失败: {e}")
             return False
-    
-    def sync_local_data(self) -> int:
-        """
-        同步本地数据到数据库
-        
-        Returns:
-            成功上传的记录数
-        """
-        if not self.api_url or not self.config['database_enabled']:
-            self.logger.warning("数据库不可用，无法上传本地备份")
-            return 0
-        
-        if not self.config['auto_sync_enabled']:
-            self.logger.info("自动同步已禁用")
-            return 0
-        
-        uploaded_count = 0
-        
-        # 同步JSONL格式的本地数据
-        try:
-            for filename in os.listdir(self.local_data_dir):
-                if filename.startswith('scans_') and filename.endswith('.jsonl'):
-                    filepath = os.path.join(self.local_data_dir, filename)
-                    uploaded_count += self._sync_jsonl_file(filepath)
-        except FileNotFoundError:
-            self.logger.info("没有找到本地数据目录")
-        
-        return uploaded_count
-    
+
     def _sync_jsonl_file(self, filepath: str) -> int:
         """同步单个JSONL文件"""
         uploaded_count = 0
@@ -458,36 +350,23 @@ class DatabaseManagerHTTP:
                     record = json.loads(line.strip())
                     if not record.get('synced', False):
                         # 尝试上传
-                        scan_data = {
-                            'barcode_data': record['barcode_data'],
-                            'device_port': record['device_port'],
-                            'scan_time': record.get('scan_time', datetime.now().isoformat()),
-                            'status': record.get('status')
-                        }
-                        
-                        response = requests.post(
-                            f"{self.api_url}/barcode_scans",
-                            headers=self.headers,
-                            json=scan_data,
-                            timeout=10
-                        )
-                        
-                        if response.status_code in [200, 201]:
+                        barcode_with_status = f"{self._get_status_prefix(record.get('status', ''))}@{record['barcode_data']}"
+                        if self.upload_scan_data(barcode_with_status, record.get('device_port', 'unknown')):
                             record['synced'] = True
+                            record['sync_time'] = self._get_pacific_time()
                             uploaded_count += 1
-                            self.logger.debug(f"同步成功: {record['barcode_data']} (状态: {record.get('status', '无')})")
                     
-                    unsynced_lines.append(json.dumps(record, ensure_ascii=False) + '\n')
+                    unsynced_lines.append(json.dumps(record, ensure_ascii=False))
                     
-                except Exception as e:
-                    self.logger.error(f"同步记录失败: {e}")
-                    unsynced_lines.append(line)
+                except json.JSONDecodeError:
+                    # 保留无法解析的行
+                    unsynced_lines.append(line.strip())
             
-            # 更新文件
-            if uploaded_count > 0:
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.writelines(unsynced_lines)
-                
+            # 重写文件
+            with open(filepath, 'w', encoding='utf-8') as f:
+                for line in unsynced_lines:
+                    f.write(line + '\n')
+                    
         except Exception as e:
             self.logger.error(f"同步文件失败 {filepath}: {e}")
         

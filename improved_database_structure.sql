@@ -4,7 +4,7 @@
 -- ====================================
 
 -- 创建新的条码扫描记录表
-CREATE TABLE IF NOT EXISTS barcode_scans_new (
+CREATE TABLE IF NOT EXISTS barcode_scans (
     id BIGSERIAL PRIMARY KEY,
     barcode_data VARCHAR(500) NOT NULL UNIQUE,
     device_port VARCHAR(50),
@@ -82,10 +82,10 @@ CREATE TABLE IF NOT EXISTS barcode_scans_new (
 );
 
 -- 创建索引
-CREATE INDEX IF NOT EXISTS idx_barcode_scans_new_barcode_data ON barcode_scans_new(barcode_data);
-CREATE INDEX IF NOT EXISTS idx_barcode_scans_new_current_status ON barcode_scans_new(current_status);
-CREATE INDEX IF NOT EXISTS idx_barcode_scans_new_last_scan_time ON barcode_scans_new(last_scan_time);
-CREATE INDEX IF NOT EXISTS idx_barcode_scans_new_device_port ON barcode_scans_new(device_port);
+CREATE INDEX IF NOT EXISTS idx_barcode_scans_barcode_data ON barcode_scans(barcode_data);
+CREATE INDEX IF NOT EXISTS idx_barcode_scans_current_status ON barcode_scans(current_status);
+CREATE INDEX IF NOT EXISTS idx_barcode_scans_last_scan_time ON barcode_scans(last_scan_time);
+CREATE INDEX IF NOT EXISTS idx_barcode_scans_device_port ON barcode_scans(device_port);
 
 -- 创建更新时间的触发器
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -116,13 +116,13 @@ SELECT
     status_4_time as 入库时间,
     status_5_time as 部分出库时间,
     status_6_time as 出库时间
-FROM barcode_scans_new
+FROM barcode_scans
 ORDER BY last_scan_time DESC;
 
 -- 统计各状态数量（基于自动计算的current_status）
-SELECT 
+SELECT  
     current_status,
     COUNT(*) as 数量
-FROM barcode_scans_new
+FROM barcode_scans
 GROUP BY current_status
 ORDER BY 数量 DESC;
